@@ -1,24 +1,31 @@
-# cert-watcher 🔒
+# cert-watcher 🖥️
 
 > SSL/TLS 证书过期监控工具
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
-[![OpenSSL](https://img.shields.io/badge/OpenSSL-3.0-blue.svg)](https://www.openssl.org/)
+[![OpenSSL](https://img.shields.io/badge/OpenSSL-Required-blue.svg)](https://www.openssl.org/)
 
-一个简单实用的 SSL/TLS 证书监控工具，实时监测证书过期时间，临近过期时自动发送告警通知。
+一个简单实用的 SSL/TLS 证书过期监控工具，实时监测证书状态，异常时发送告警通知。
 
 ## ✨ 特性
 
-- 🚀 轻量级，纯 Shell 脚本
-- ⚡ 支持多主机多端口监控
-- 🔔 智能告警（WARNING/CRITICAL）
-- 📢 支持 Slack Webhook 通知
-- 📝 详细的日志记录
-- 🔧 灵活的配置
-- ⏰ 可配置检测间隔和阈值
+- 🚀 **轻量级** — 纯 Shell 脚本，仅依赖 OpenSSL
+- ⚡ **多域名监控** — 支持同时监控多个域名的证书
+- 🔔 **多种通知** — 支持 Slack、Telegram Webhook 告警
+- 📊 **状态可视化** — 颜色输出，快速识别证书状态
+- 📝 **详细日志** — 记录所有检测结果和状态变化
+- 🔧 **灵活配置** — 支持配置文件和命令行参数
+- 📋 **报告模式** — 一键生成证书健康报告
+- ⏰ **守护进程** — 支持后台持续监控
 
 ## 🏃 快速开始
+
+### 前置要求
+
+- Bash 4.0+
+- OpenSSL
+- curl (用于通知)
 
 ### 安装
 
@@ -34,58 +41,87 @@ chmod +x bin/cert-watcher.sh
 ### 使用
 
 ```bash
-# 使用默认配置 (config/certs.conf)
+# 使用默认配置 (config/domains.conf)
 ./bin/cert-watcher.sh
 
-# 指定配置文件
-./bin/cert-watcher.sh -c /path/to/certs.conf
+# 生成证书健康报告 (单次)
+./bin/cert-watcher.sh --report
 
-# 设置检测间隔 (每小时)
+# 指定配置文件
+./bin/cert-watcher.sh -c /path/to/domains.conf
+
+# 设置检测间隔 (1小时)
 ./bin/cert-watcher.sh -i 3600
+
+# 设置告警阈值 (提前14天告警)
+./bin/cert-watcher.sh -d 14
 
 # 启用 Slack 通知
 ./bin/cert-watcher.sh -w "https://hooks.slack.com/services/xxx"
 
-# 自定义告警阈值
-./bin/cert-watcher.sh --warning 14 --critical 7
+# 启用 Telegram 通知
+export TELEGRAM_BOT_TOKEN="your-bot-token"
+export TELEGRAM_CHAT_ID="your-chat-id"
+./bin/cert-watcher.sh
 ```
 
 ## ⚙️ 配置
 
-编辑 `config/certs.conf` 文件：
+编辑 `config/domains.conf` 文件：
 
 ```bash
 # 格式: host:port
+# # 开头的行为注释
 
-# 常用 HTTPS 服务
-google.com:443
+# 常用网站
 github.com:443
-cloudflare.com:443
+google.com:443
 
-# 本地服务
-localhost:8443
-localhost:443
+# 国内服务
+baidu.com:443
+alipay.com:443
+
+# 自定义域名
+example.com:443
+api.example.com:8443
 ```
-
-### 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| CONFIG_FILE | 配置文件路径 | ./config/certs.conf |
-| LOG_FILE | 日志文件路径 | ./log/cert-watcher.log |
-| NOTIFY_WEBHOOK | Slack Webhook URL | - |
 
 ## 📋 命令行选项
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| -c, --config FILE | 配置文件路径 | ./config/certs.conf |
-| -i, --interval SEC | 检测间隔秒数 | 86400 (24小时) |
-| -t, --timeout SEC | 连接超时秒数 | 10 |
-| -w, --webhook URL | 告警Webhook URL | - |
-| --warning DAYS | 警告阈值天数 | 30 |
-| --critical DAYS | 紧急阈值天数 | 7 |
-| -h, --help | 显示帮助 | - |
+| `-c, --config` FILE | 配置文件路径 | ./config/domains.conf |
+| `-i, --interval` SEC | 检测间隔秒数 | 86400 (24小时) |
+| `-d, --days` N | 警告阈值(提前N天) | 30 |
+| `-D, --critical` N | 严重告警阈值(天) | 7 |
+| `-w, --webhook` URL | Slack Webhook URL | - |
+| `-r, --report` | 生成报告模式(单次) | - |
+| `-h, --help` | 显示帮助 | - |
+| `-v, --version` | 显示版本 | - |
+
+## 🔔 通知配置
+
+### Slack Webhook
+
+```bash
+./bin/cert-watcher.sh -w "https://hooks.slack.com/services/xxx"
+```
+
+### Telegram Bot
+
+```bash
+export TELEGRAM_BOT_TOKEN="your-bot-token"
+export TELEGRAM_CHAT_ID="your-chat-id"
+./bin/cert-watcher.sh
+```
+
+## 📊 证书状态说明
+
+| 状态 | 剩余天数 | 颜色 | 说明 |
+|------|---------|------|------|
+| 🟢 OK | > 30 天 | 绿色 | 证书正常 |
+| 🟡 WARNING | 8-30 天 | 黄色 | 即将过期，注意续期 |
+| 🔴 CRITICAL | ≤ 7 天 | 红色 | 紧急! 立即续期 |
 
 ## 📁 项目结构
 
@@ -94,48 +130,55 @@ cert-watcher/
 ├── bin/
 │   └── cert-watcher.sh      # 主脚本
 ├── config/
-│   └── certs.conf           # 证书配置
-├── log/                     # 日志目录
+│   └── domains.conf          # 域名配置
+├── log/                      # 日志目录
 │   └── .gitkeep
 ├── README.md
-└── LICENSE
+├── LICENSE
+└── CHANGELOG.md
 ```
 
 ## 📝 日志
 
 日志默认保存在 `./log/cert-watcher.log`，包含：
-- 启动信息
-- 证书检查结果
-- 告警信息
+- 启动/停止信息
+- 证书检测结果
+- 状态变化记录
 - 错误信息
 
-## 🔔 告警通知
+## 🔧 高级用法
 
-支持 Slack Webhook：
+### 定时任务 (crontab)
 
 ```bash
-./bin/cert-watcher.sh -w "https://hooks.slack.com/services/xxx"
+# 每天早上9点生成报告
+0 9 * * * /path/to/cert-watcher.sh --report
+
+# 每6小时检测一次 (生产环境推荐)
+0 */6 * * * /path/to/cert-watcher.sh -i 21600 -w "https://hooks.slack.com/..."
 ```
 
-告警消息会显示：
-- 主机和端口
-- 剩余天数
-- 状态（OK/WARNING/CRITICAL）
+### 监控内网服务
 
-## 📊 状态说明
+```bash
+# 监控自签名证书 (使用 -d 0 忽略过期警告)
+internal.example.com:8443
+```
 
-| 状态 | 颜色 | 含义 |
-|------|------|------|
-| OK | 🟢 绿色 | 证书正常，剩余天数 > 警告阈值 |
-| WARNING | 🟡 黄色 | 证书即将过期，剩余天数 ≤ 警告阈值 |
-| CRITICAL | 🔴 红色 | 证书紧急过期，剩余天数 ≤ 紧急阈值 |
+## 🔄 CHANGELOG
 
-## 🔧 扩展
+### v1.0.0 (2026-03-25)
 
-- [ ] 添加邮件通知支持
-- [ ] 添加企业微信通知
-- [ ] 添加 Prometheus 指标导出
-- [ ] 添加证书详情展示（颁发者、域名等）
+- ✨ 初始版本发布
+- ⚡ 支持多域名证书监控
+- 🔔 支持 Slack Webhook 通知
+- 📱 支持 Telegram Bot 通知
+- 📊 支持单次报告模式
+- 🔧 支持自定义告警阈值
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
 
 ## 📄 许可证
 
@@ -144,7 +187,3 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 ## 👤 作者
 
 Chen Su
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！

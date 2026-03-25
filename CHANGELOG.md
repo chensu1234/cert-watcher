@@ -1,12 +1,21 @@
 # CHANGELOG
 
-All notable changes to this project will be documented in this file.
+所有 notable changes 都将记录在此文件。
 
-## [1.0.0] - 2026-03-23
+## [1.0.0] - 2026-03-25
 
-### Added
+### ✨ 新增
+
 - 初始版本发布
-- 支持多主机多端口证书监控
-- 支持 Slack Webhook 告警通知
-- 支持自定义告警阈值（WARNING/CRITICAL）
-- 详细的日志记录
+- 多域名 SSL/TLS 证书监控
+- OpenSSL 证书信息提取
+- 证书过期天数计算
+- 三色状态标识 (OK/WARNING/CRITICAL)
+- Slack Webhook 通知
+- Telegram Bot 通知
+- 守护进程模式 (持续监控)
+- 报告模式 (单次执行)
+- 配置文件支持
+- 详细日志记录
+- 命令行参数覆盖配置
+- 颜色输出终端UI
