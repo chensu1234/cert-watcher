@@ -1,417 +1,744 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# cert-watcher - SSL/TLS 证书过期监控工具
-# 作者: Chen Su
-# 许可证: MIT
+# cert-watcher.sh - SSL/TLS Certificate Monitoring and Expiration Alert Tool
 #
-# 兼容性: Bash 3.2+ (macOS/Linux)
+# This script monitors SSL/TLS certificates (from local files or remote hosts)
+# and sends alerts before they expire. It tracks certificate state and only
+# notifies on state changes to avoid alert fatigue.
+#
+# Usage: cert-watcher.sh [OPTIONS]
+#
+# Options:
+#   -c, --config FILE      Configuration file path (default: ./config/certs.conf)
+#   -i, --interval SECONDS Check interval in seconds (default: 3600 = 1 hour)
+#   -w, --warning DAYS     Warning threshold in days (default: 30)
+#   -r, --critical DAYS    Critical threshold in days (default: 7)
+#   -u, --webhook URL      Webhook URL for notifications
+#   -h, --help             Show this help message
+#
+# Requirements:
+#   - openssl (for certificate extraction)
+#   - curl (for webhook notifications)
+#   - bash 4.0+ (for associative arrays)
+#
+# Author: Chen Su
+# License: MIT
 #
 
 set -euo pipefail
 
-# ============================================================
-# 颜色定义
-# ============================================================
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# ----------------------------------------------------------------------
+# Script Configuration - Defaults
+# ----------------------------------------------------------------------
 
-# ============================================================
-# 默认配置
-# ============================================================
-CONFIG_FILE="${CONFIG_FILE:-./config/domains.conf}"
-LOG_FILE="${LOG_FILE:-./log/cert-watcher.log}"
-INTERVAL="${INTERVAL:-86400}"
-WARNING_DAYS="${WARNING_DAYS:-30}"
-CRITICAL_DAYS="${CRITICAL_DAYS:-7}"
-NOTIFY_WEBHOOK="${NOTIFY_WEBHOOK:-}"
-MODE="${MODE:-daemon}"
+# Default paths (can be overridden via command-line arguments)
+CONFIG_FILE="./config/certs.conf"
+CHECK_INTERVAL=3600          # 1 hour in seconds
+WARNING_THRESHOLD=30         # days
+CRITICAL_THRESHOLD=7         # days
+WEBHOOK_URL=""               # empty = no webhook notifications
+STATE_FILE="./var/cert-state.json"
+LOG_FILE="./log/cert-watcher.log"
 
-# ============================================================
-# 帮助信息
-# ============================================================
+# Color codes for terminal output (disabled if not a terminal)
+if [[ -t 1 ]]; then
+    COLOR_GREEN='\033[0;32m'
+    COLOR_YELLOW='\033[0;33m'
+    COLOR_RED='\033[0;31m'
+    COLOR_BLUE='\033[0;34m'
+    COLOR_RESET='\033[0m'
+    COLOR_BOLD='\033[1m'
+else
+    COLOR_GREEN=''
+    COLOR_YELLOW=''
+    COLOR_RED=''
+    COLOR_BLUE=''
+    COLOR_RESET=''
+    COLOR_BOLD=''
+fi
+
+# ----------------------------------------------------------------------
+# Utility Functions
+# ----------------------------------------------------------------------
+
+# Log a message to the log file and optionally to stdout
+# Usage: log "INFO" "Message text"
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    # Ensure log directory exists
+    mkdir -p "$(dirname "$LOG_FILE")"
+
+    # Append to log file
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+
+    # Also print to stdout if it's a terminal
+    if [[ -t 1 ]]; then
+        echo -e "[$timestamp] [$level] $message"
+    fi
+}
+
+# Send a webhook notification (JSON payload)
+# Usage: send_webhook "alert|recovery" "hostname" "message" "days_until_expiry"
+send_webhook() {
+    local event_type="$1"
+    local target="$2"
+    local message="$3"
+    local days_left="$4"
+
+    # Skip if no webhook URL configured
+    if [[ -z "$WEBHOOK_URL" ]]; then
+        return 0
+    fi
+
+    # Build JSON payload
+    local payload
+    payload=$(cat <<EOF
+{
+  "event_type": "$event_type",
+  "target": "$target",
+  "message": "$message",
+  "days_until_expiry": $days_left,
+  "timestamp": "$(date -Iseconds)"
+}
+EOF
+)
+
+    # Send webhook notification (non-blocking, with timeout)
+    if command -v curl &>/dev/null; then
+        curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            --max-time 10 \
+            "$WEBHOOK_URL" &>/dev/null || true
+    fi
+}
+
+# Parse command-line arguments
+# Usage: parse_args "$@"
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c|--config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            -i|--interval)
+                CHECK_INTERVAL="$2"
+                shift 2
+                ;;
+            -w|--warning)
+                WARNING_THRESHOLD="$2"
+                shift 2
+                ;;
+            -r|--critical)
+                CRITICAL_THRESHOLD="$2"
+                shift 2
+                ;;
+            -u|--webhook)
+                WEBHOOK_URL="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo -e "${COLOR_RED}Error: Unknown option: $1${COLOR_RESET}" >&2
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Display help message
 show_help() {
-    cat << EOF
-${BOLD}cert-watcher${NC} - SSL/TLS 证书过期监控工具
+    cat <<'HELP_EOF'
+cert-watcher.sh - SSL/TLS Certificate Monitoring and Expiration Alert Tool
 
-${BOLD}用法:${NC}
-    $(basename "$0") [选项]
+USAGE:
+    cert-watcher.sh [OPTIONS]
 
-${BOLD}选项:${NC}
-    -c, --config FILE      配置文件路径 (默认: ./config/domains.conf)
-    -i, --interval SEC     检测间隔秒数 (默认: 86400)
-    -d, --days N           提前告警天数 (默认: 30)
-    -D, --critical N       严重告警天数 (默认: 7)
-    -w, --webhook URL      Slack Webhook URL
-    -r, --report           生成报告模式 (单次执行)
-    -h, --help             显示帮助信息
-    -v, --version          显示版本信息
+OPTIONS:
+    -c, --config FILE      Configuration file path (default: ./config/certs.conf)
+    -i, --interval SECONDS Check interval in seconds (default: 3600 = 1 hour)
+    -w, --warning DAYS     Warning threshold in days (default: 30)
+    -r, --critical DAYS    Critical threshold in days (default: 7)
+    -u, --webhook URL      Webhook URL for notifications (Slack/generic)
+    -h, --help             Show this help message
 
-${BOLD}示例:${NC}
-    $(basename "$0") -c /etc/cert-watcher.conf -i 3600
-    $(basename "$0") -w https://hooks.slack.com/services/xxx -d 14
-    $(basename "$0") --report
+CONFIGURATION FILE FORMAT:
+    Each line can be:
+      - host:port   (e.g., example.com:443)
+      - /path/to/cert.pem  (local certificate file)
+    Lines starting with # are comments.
+    Blank lines are ignored.
 
+EXAMPLES:
+    # Check certificates every hour (default)
+    ./cert-watcher.sh
+
+    # Check every 5 minutes with custom config
+    ./cert-watcher.sh -c /path/to/certs.conf -i 300
+
+    # Custom warning (45 days) and critical (14 days) thresholds
+    ./cert-watcher.sh -w 45 -r 14
+
+    # Enable Slack notifications
+    ./cert-watcher.sh -u https://hooks.slack.com/services/xxx/yyy/zzz
+
+EXIT CODES:
+    0   All certificates are valid (or only warnings)
+    1   One or more certificates are expired or critical
+    2   Configuration error or file not found
+
+HELP_EOF
+}
+
+# ----------------------------------------------------------------------
+# Certificate Functions
+# ----------------------------------------------------------------------
+
+# Check a remote host's SSL certificate
+# Usage: check_remote_cert "host" "port"
+# Returns: JSON string with cert info or empty on failure
+check_remote_cert() {
+    local host="$1"
+    local port="$2"
+
+    # Use openssl to get certificate info with timeout
+    # The -servername flag enables SNI (Server Name Indication)
+    local cert_info
+    cert_info=$(echo | openssl s_client -servername "$host" -connect "${host}:${port}" 2>/dev/null \
+        | openssl x509 -noout -dates -subject -issuer -ext subjectAltName 2>/dev/null) || return 1
+
+    # Extract expiration date
+    local not_after
+    not_after=$(echo "$cert_info" | grep "notAfter=" | sed 's/notAfter=//') || return 1
+
+    # Convert to days until expiration
+    local expiry_epoch
+    expiry_epoch=$(date -j -f "%b %d %T %Y %Z" "$not_after" "+%s" 2>/dev/null) || return 1
+
+    local now_epoch
+    now_epoch=$(date "+%s")
+    local days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+    # Extract subject/CN
+    local subject
+    subject=$(echo "$cert_info" | grep "subject=" | sed 's/subject=//') || subject="$host"
+
+    # Extract issuer
+    local issuer
+    issuer=$(echo "$cert_info" | grep "issuer=" | sed 's/issuer=//') || issuer="Unknown"
+
+    # Extract SANs (Subject Alternative Names)
+    local sans
+    sans=$(echo "$cert_info" | grep -A1 "Subject Alternative Name" | tail -1 \
+        | sed 's/DNS://g' | tr ',' '\n' | tr -d ' ' | grep -v '^$' | tr '\n' ',' | sed 's/,$//') || sans=""
+
+    # Build JSON result
+    cat <<EOF
+{
+  "type": "remote",
+  "host": "$host",
+  "port": $port,
+  "subject": "$subject",
+  "issuer": "$issuer",
+  "sans": "$sans",
+  "not_after": "$not_after",
+  "days_left": $days_left,
+  "expiry_epoch": $expiry_epoch
+}
 EOF
 }
 
-show_version() {
-    echo "cert-watcher v1.0.0"
-}
+# Check a local certificate file
+# Usage: check_local_cert "/path/to/cert.pem"
+# Returns: JSON string with cert info or empty on failure
+check_local_cert() {
+    local cert_file="$1"
 
-# ============================================================
-# 日志函数
-# ============================================================
-log() {
-    local level="$1"
-    shift
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
-    echo -e "$msg" | tee -a "$LOG_FILE" 2>/dev/null || echo "$msg"
-}
-
-print_banner() {
-    echo -e "${CYAN}========================================${NC}"
-    echo -e "${CYAN}      cert-watcher v1.0.0${NC}"
-    echo -e "${CYAN}   SSL/TLS 证书过期监控工具${NC}"
-    echo -e "${CYAN}========================================${NC}"
-    echo
-}
-
-# ============================================================
-# 兼容 date 命令 (macOS vs Linux)
-# ============================================================
-parse_expiry_epoch() {
-    local date_str="$1"
-    # Linux (GNU)
-    if date -d "$date_str" +%s >/dev/null 2>&1; then
-        date -d "$date_str" +%s
-    else
-        # macOS (BSD) - 使用 perl 来解析
-        perl -MTime::Piece -le "
-            my \$t = Time::Piece->strptime('$date_str', '%b %d %H:%M:%S %Y');
-            print \$t->epoch;
-        " 2>/dev/null
-    fi
-}
-
-format_epoch() {
-    local epoch="$1"
-    if date -d "@$epoch" +%Y-%m-%d >/dev/null 2>&1; then
-        date -d "@$epoch" "+%Y-%m-%d %H:%M:%S"
-    else
-        perl -le "print scalar(localtime($epoch));" 2>/dev/null
-    fi
-}
-
-# ============================================================
-# 解析配置文件
-# ============================================================
-parse_config() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "ERROR" "配置文件不存在: $CONFIG_FILE"
-        exit 1
+    # Check if file exists and is readable
+    if [[ ! -r "$cert_file" ]]; then
+        return 1
     fi
 
-    local domains=()
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]] && continue
-
-        if [[ "$line" =~ ^([^:#]+)(:[0-9]+)? ]]; then
-            local host="${BASH_REMATCH[1]}"
-            local port="${BASH_REMATCH[2]:-':443'}"
-            port="${port#:}"
-            domains+=("$host:$port")
-        fi
-    done < "$CONFIG_FILE"
-
-    printf '%s\n' "${domains[@]}"
-}
-
-# ============================================================
-# 获取证书信息
-# ============================================================
-get_cert_info() {
-    local host="$1"
-    local port="$2"
-
+    # Use openssl to extract certificate info
     local cert_info
-    cert_info=$(<<< "" timeout 15 openssl s_client -servername "$host" -connect "$host:$port" 2>/dev/null | \
-                 openssl x509 -noout -dates -issuer 2>&1) || return 1
+    cert_info=$(openssl x509 -in "$cert_file" -noout -dates -subject -issuer -ext subjectAltName 2>/dev/null) || return 1
 
+    # Extract expiration date
     local not_after
-    not_after=$(echo "$cert_info" | grep "notAfter=" | cut -d'=' -f2)
-    [[ -z "$not_after" ]] && return 1
+    not_after=$(echo "$cert_info" | grep "notAfter=" | sed 's/notAfter=//') || return 1
 
-    local issuer
-    issuer=$(echo "$cert_info" | grep "issuer=" | cut -d'=' -f2- | sed 's/^ *//')
-
-    local expiry_epoch valid_days
-    expiry_epoch=$(parse_expiry_epoch "$not_after") || return 1
+    # Convert to days until expiration
+    local expiry_epoch
+    expiry_epoch=$(date -j -f "%b %d %T %Y %Z" "$not_after" "+%s" 2>/dev/null) || return 1
 
     local now_epoch
-    now_epoch=$(date +%s)
-    valid_days=$(( (expiry_epoch - now_epoch) / 86400 ))
+    now_epoch=$(date "+%s")
+    local days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
 
-    echo "${expiry_epoch}|${issuer}|${valid_days}"
+    # Extract subject/CN
+    local subject
+    subject=$(echo "$cert_info" | grep "subject=" | sed 's/subject=//') || subject="$(basename "$cert_file")"
+
+    # Extract issuer
+    local issuer
+    issuer=$(echo "$cert_info" | grep "issuer=" | sed 's/issuer=//') || issuer="Unknown"
+
+    # Extract SANs
+    local sans
+    sans=$(echo "$cert_info" | grep -A1 "Subject Alternative Name" | tail -1 \
+        | sed 's/DNS://g' | tr ',' '\n' | tr -d ' ' | grep -v '^$' | tr '\n' ',' | sed 's/,$//') || sans=""
+
+    # Build JSON result
+    cat <<EOF
+{
+  "type": "local",
+  "file": "$cert_file",
+  "subject": "$subject",
+  "issuer": "$issuer",
+  "sans": "$sans",
+  "not_after": "$not_after",
+  "days_left": $days_left,
+  "expiry_epoch": $expiry_epoch
+}
+EOF
 }
 
-# ============================================================
-# 获取证书 CN
-# ============================================================
-get_cert_cn() {
-    local host="$1"
-    local port="$2"
+# Determine certificate status based on days left
+# Usage: get_status "$days_left"
+get_status() {
+    local days_left="$1"
 
-    <<< "" timeout 15 openssl s_client -servername "$host" -connect "$host:$port" 2>/dev/null | \
-           openssl x509 -noout -subject 2>/dev/null | \
-           sed 's/.*CN\s*=\s*\([^,]*\).*/\1/' | sed 's/^ *//'
+    if [[ $days_left -le 0 ]]; then
+        echo "EXPIRED"
+    elif [[ $days_left -le CRITICAL_THRESHOLD ]]; then
+        echo "CRITICAL"
+    elif [[ $days_left -le WARNING_THRESHOLD ]]; then
+        echo "WARNING"
+    else
+        echo "OK"
+    fi
 }
 
-# ============================================================
-# 状态判断
-# ============================================================
+# Get a color for a status
+# Usage: get_status_color "STATUS"
 get_status_color() {
-    local days="$1"
-    if [[ $days -le CRITICAL_DAYS ]]; then
-        echo "$RED"
-    elif [[ $days -le WARNING_DAYS ]]; then
-        echo "$YELLOW"
-    else
-        echo "$GREEN"
+    case "$1" in
+        EXPIRED|CRITICAL) echo "$COLOR_RED" ;;
+        WARNING)          echo "$COLOR_YELLOW" ;;
+        OK)               echo "$COLOR_GREEN" ;;
+        *)                echo "$COLOR_RESET" ;;
+    esac
+}
+
+# Get an emoji for a status
+get_status_emoji() {
+    case "$1" in
+        EXPIRED)  echo "💀" ;;
+        CRITICAL) echo "🔴" ;;
+        WARNING)  echo "⚠️" ;;
+        OK)       echo "✅" ;;
+        *)        echo "❓" ;;
+    esac
+}
+
+# ----------------------------------------------------------------------
+# State Management Functions
+# ----------------------------------------------------------------------
+
+# Load previous certificate states from state file
+# Usage: load_states
+load_states() {
+    if [[ -f "$STATE_FILE" && -r "$STATE_FILE" ]]; then
+        # Parse JSON state file using grep and sed (simple parser)
+        # Format: "target": { "status": "OK", "last_check": "..." }
+        while IFS= read -r line; do
+            # Extract target name
+            target=$(echo "$line" | sed -n 's/.*"\([^"]*\)":.*/\1/p')
+            status=$(echo "$line" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')
+            if [[ -n "$target" && -n "$status" ]]; then
+                declare -g "STATE_$target=$status"
+            fi
+        done < <(grep -o '"[^"]*":.*"status"' "$STATE_FILE" 2>/dev/null || true)
     fi
 }
 
-get_status_label() {
-    local days="$1"
-    if [[ $days -le CRITICAL_DAYS ]]; then
-        echo "🔴 CRITICAL"
-    elif [[ $days -le WARNING_DAYS ]]; then
-        echo "🟡 WARNING"
-    else
-        echo "🟢 OK"
+# Save current certificate states to state file
+# Usage: save_states
+save_states() {
+    local temp_file="${STATE_FILE}.tmp"
+    mkdir -p "$(dirname "$STATE_FILE")"
+
+    {
+        echo "{"
+        echo "  \"states\": {"
+        local first=true
+        for var in "${!STATE_@}"; do
+            if [[ "$var" != "STATE_FILE" ]]; then
+                local target="${var#STATE_}"
+                local status="${!var}"
+                if [[ "$first" == "true" ]]; then
+                    first=false
+                else
+                    echo ","
+                fi
+                printf '    "%s": {"status": "%s", "updated": "%s"}' \
+                    "$target" "$status" "$(date -Iseconds)"
+            fi
+        done
+        echo ""
+        echo "  }"
+        echo "}"
+    } > "$temp_file"
+
+    mv "$temp_file" "$STATE_FILE"
+}
+
+# Check if state has changed and needs notification
+# Usage: state_changed "target" "new_status"
+# Returns: 0 if changed, 1 if unchanged
+state_changed() {
+    local target="$1"
+    local new_status="$2"
+    local var_name="STATE_${target}"
+    local old_status="${!var_name:-UNCHECKED}"
+
+    # Alert if status changed from OK to something else, or from WARNING to CRITICAL, etc.
+    if [[ "$old_status" != "$new_status" ]]; then
+        return 0
     fi
+    return 1
 }
 
-# ============================================================
-# 发送 Slack 通知
-# ============================================================
-send_slack_notification() {
-    local hostname="$1" port="$2" days="$3" expiry_date="$4" status="$5" cert_cn="$6"
-
-    [[ -z "$NOTIFY_WEBHOOK" ]] && return
-
-    local color
-    case "$status" in
-        CRITICAL) color="#FF0000" ;;
-        WARNING)  color="#FFA500" ;;
-        OK)       color="#36A64F" ;;
-    esac
-
-    local payload="{\"attachments\":[{\"color\":\"$color\",\"title\":\"证书告警: $hostname:$port\",\"fields\":[{\"title\":\"域名\",\"value\":\"$cert_cn\",\"short\":true},{\"title\":\"剩余天数\",\"value\":\"$days 天\",\"short\":true},{\"title\":\"过期时间\",\"value\":\"$expiry_date\",\"short\":true},{\"title\":\"状态\",\"value\":\"$status\",\"short\":true}],\"footer\":\"cert-watcher\",\"ts\":$(date +%s)}]}"
-
-    curl -s -X POST "$NOTIFY_WEBHOOK" \
-        -H 'Content-Type: application/json' \
-        -d "$payload" > /dev/null 2>&1 || true
+# Update state for a target
+# Usage: update_state "target" "status"
+update_state() {
+    local target="$1"
+    local status="$2"
+    declare "STATE_${target}=$status"
 }
 
-# ============================================================
-# 发送 Telegram 通知
-# ============================================================
-send_telegram_notification() {
-    local hostname="$1" port="$2" days="$3" expiry_date="$4" status="$5" cert_cn="$6"
+# ----------------------------------------------------------------------
+# Configuration File Parsing
+# ----------------------------------------------------------------------
 
-    [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return
+# Parse configuration file and return list of entries
+# Usage: parse_config
+parse_config() {
+    local config_file="$1"
 
-    local emoji
-    case "$status" in
-        CRITICAL) emoji="🔴" ;;
-        WARNING)  emoji="🟡" ;;
-        OK)       emoji="🟢" ;;
-    esac
-
-    local message="${emoji} *证书告警*
-
-*域名:* \`$hostname:$port\`
-*证书:* \`$cert_cn\`
-*剩余:* \`${days} 天\`
-*过期:* \`$expiry_date\`
-*状态:* \`$status\`"
-
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}&text=${message}&parse_mode=Markdown" > /dev/null 2>&1 || true
-}
-
-# ============================================================
-# 检查单个证书
-# ============================================================
-check_cert() {
-    local host="$1"
-    local port="$2"
-
-    log "INFO" "检查证书: $host:$port"
-
-    local cert_info
-    cert_info=$(get_cert_info "$host" "$port") || {
-        log "ERROR" "无法获取证书: $host:$port"
+    if [[ ! -f "$config_file" ]]; then
+        log "ERROR" "Configuration file not found: $config_file"
         return 1
+    fi
+
+    if [[ ! -r "$config_file" ]]; then
+        log "ERROR" "Configuration file not readable: $config_file"
+        return 1
+    fi
+
+    # Read lines, skip comments and blank lines
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Trim whitespace
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Skip empty lines
+        [[ -z "$line" ]] && continue
+
+        # Skip comment lines
+        [[ "$line" == \#* ]] && continue
+
+        # Remove inline comments
+        line=$(echo "$line" | sed 's/#.*//')
+
+        # Trim again after inline comment removal
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Skip if nothing left
+        [[ -z "$line" ]] && continue
+
+        # Output the entry
+        echo "$line"
+    done < "$config_file"
+}
+
+# ----------------------------------------------------------------------
+# Main Monitoring Functions
+# ----------------------------------------------------------------------
+
+# Check a single certificate entry
+# Usage: check_entry "entry"
+check_entry() {
+    local entry="$1"
+    local cert_json=""
+
+    # Determine if this is a file path or host:port
+    if [[ "$entry" == /* ]]; then
+        # Local file path
+        log "INFO" "Checking local certificate: $entry"
+        cert_json=$(check_local_cert "$entry") || {
+            log "ERROR" "Failed to check local certificate: $entry"
+            return 1
+        }
+    elif [[ "$entry" == *:* ]]; then
+        # host:port format
+        local host="${entry%:*}"
+        local port="${entry#*:}"
+        log "INFO" "Checking remote certificate: ${host}:${port}"
+        cert_json=$(check_remote_cert "$host" "$port") || {
+            log "ERROR" "Failed to check remote certificate: ${host}:${port}"
+            return 1
+        }
+    else
+        log "ERROR" "Invalid entry format: $entry"
+        return 1
+    fi
+
+    # Parse JSON output
+    local cert_type subject issuer sans not_after days_left
+    cert_type=$(echo "$cert_json" | sed -n 's/.*"type": *"\([^"]*\)".*/\1/p')
+    subject=$(echo "$cert_json" | sed -n 's/.*"subject": *"\([^"]*\)".*/\1/p')
+    issuer=$(echo "$cert_json" | sed -n 's/.*"issuer": *"\([^"]*\)".*/\1/p')
+    sans=$(echo "$cert_json" | sed -n 's/.*"sans": *"\([^"]*\)".*/\1/p')
+    not_after=$(echo "$cert_json" | sed -n 's/.*"not_after": *"\([^"]*\)".*/\1/p')
+    days_left=$(echo "$cert_json" | sed -n 's/.*"days_left": *\([0-9-]*\).*/\1/p')
+
+    # Determine status
+    local status
+    status=$(get_status "$days_left")
+    local color
+    color=$(get_status_color "$status")
+    local emoji
+    emoji=$(get_status_emoji "$status")
+
+    # Create target identifier for state tracking
+    local target
+    if [[ "$cert_type" == "local" ]]; then
+        target="file:${entry}"
+    else
+        target="remote:${host}:${port}"
+    fi
+
+    # Display result with colors
+    if [[ -t 1 ]]; then
+        echo -e "${color}${emoji} ${target}: ${status} (${days_left} days left)${COLOR_RESET}"
+        echo -e "   Subject: ${subject}"
+        echo -e "   Issuer: ${issuer}"
+        echo -e "   Expires: ${not_after}"
+        if [[ -n "$sans" ]]; then
+            echo -e "   SANs: ${sans}"
+        fi
+    else
+        echo "${emoji} ${target}: ${status} (${days_left} days left)"
+        echo "   Subject: ${subject}"
+        echo "   Issuer: ${issuer}"
+        echo "   Expires: ${not_after}"
+        if [[ -n "$sans" ]]; then
+            echo "   SANs: ${sans}"
+        fi
+    fi
+
+    # Check if state changed and needs notification
+    if state_changed "$target" "$status"; then
+        log "INFO" "State changed for ${target}: ${status}"
+
+        # Send webhook notification
+        local event_type
+        if [[ "$status" == "OK" ]]; then
+            event_type="recovery"
+        else
+            event_type="alert"
+        fi
+
+        local message="${emoji} Certificate ${target} is now ${status} (${days_left} days until expiry)"
+        send_webhook "$event_type" "$target" "$message" "$days_left"
+    fi
+
+    # Update state
+    update_state "$target" "$status"
+
+    return 0
+}
+
+# Main monitoring loop
+# Usage: run_monitoring
+run_monitoring() {
+    log "INFO" "=========================================="
+    log "INFO" "cert-watcher.sh started"
+    log "INFO" "Config: $CONFIG_FILE"
+    log "INFO" "Interval: ${CHECK_INTERVAL}s"
+    log "INFO" "Warning threshold: ${WARNING_THRESHOLD} days"
+    log "INFO" "Critical threshold: ${CRITICAL_THRESHOLD} days"
+    log "INFO" "=========================================="
+
+    # Load previous states
+    load_states
+
+    # Parse configuration and get all entries
+    local entries
+    entries=$(parse_config "$CONFIG_FILE") || {
+        log "ERROR" "Failed to parse configuration file"
+        exit 2
     }
 
-    local expiry_epoch issuer valid_days
-    IFS='|' read -r expiry_epoch issuer valid_days <<< "$cert_info"
+    # Track exit status (0 = all ok, 1 = issues found)
+    local overall_status=0
+    local checked_count=0
+    local problem_count=0
 
-    local cert_cn
-    cert_cn=$(get_cert_cn "$host" "$port") || cert_cn="$host"
+    # Check each entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
 
-    local expiry_date
-    expiry_date=$(format_epoch "$expiry_epoch")
+        if check_entry "$entry"; then
+            ((checked_count++))
 
-    local status_label status_color
-    status_label=$(get_status_label "$valid_days")
-    status_color=$(get_status_color "$valid_days")
+            # Check if this entry has a problem status
+            local target
+            if [[ "$entry" == /* ]]; then
+                target="file:${entry}"
+            else
+                target="remote:${entry}"
+            fi
 
-    echo -e "  ${status_color}${status_label}${NC}  $host:$port"
-    echo -e "         证书: $cert_cn"
-    echo -e "         颁发者: $issuer"
-    echo -e "         过期: $expiry_date"
-    echo -e "         剩余: ${valid_days} 天"
-    echo
+            local var_name="STATE_${target}"
+            local status="${!var_name:-OK}"
 
-    if [[ $valid_days -le WARNING_DAYS ]]; then
-        local st
-        [[ $valid_days -le CRITICAL_DAYS ]] && st="CRITICAL" || st="WARNING"
-        send_slack_notification "$host" "$port" "$valid_days" "$expiry_date" "$st" "$cert_cn"
-        send_telegram_notification "$host" "$port" "$valid_days" "$expiry_date" "$st" "$cert_cn"
-    fi
+            if [[ "$status" != "OK" ]]; then
+                ((problem_count++))
+                overall_status=1
+            fi
+        else
+            ((problem_count++))
+            overall_status=1
+        fi
+    done <<< "$entries"
 
-    if [[ $valid_days -le CRITICAL_DAYS ]]; then
-        log "WARN" "证书即将过期: $host:$port (剩余 ${valid_days} 天)"
-    elif [[ $valid_days -le WARNING_DAYS ]]; then
-        log "WARN" "证书即将过期: $host:$port (剩余 ${valid_days} 天)"
-    fi
+    # Save states after this check
+    save_states
+
+    log "INFO" "Check complete: ${checked_count} certificates checked, ${problem_count} issue(s) found"
+
+    return $overall_status
 }
 
-# ============================================================
-# 生成报告
-# ============================================================
-generate_report() {
-    local output_file="${1:-}"
+# ----------------------------------------------------------------------
+# Single Run Mode
+# ----------------------------------------------------------------------
 
-    echo "========================================"
-    echo "      SSL 证书过期监控报告"
-    echo "      生成时间: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "========================================"
-    echo
+# Run a single check without looping
+# Usage: run_single
+run_single() {
+    log "INFO" "Running single certificate check"
 
-    local total=0 critical=0 warning=0 ok=0
+    # Load previous states
+    load_states
 
-    while IFS= read -r item; do
-        [[ -z "$item" ]] && continue
-        total=$((total + 1))
+    # Parse configuration and get all entries
+    local entries
+    entries=$(parse_config "$CONFIG_FILE") || {
+        log "ERROR" "Failed to parse configuration file"
+        exit 2
+    }
 
-        host="${item%:*}"
-        port="${item#*:}"
+    local overall_status=0
+    local checked_count=0
+    local problem_count=0
 
-        local cert_info
-        cert_info=$(get_cert_info "$host" "$port") || {
-            echo -e "${RED}✗${NC}  $host:$port - 无法获取证书"
-            continue
-        }
+    # Check each entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
 
-        local expiry_epoch issuer valid_days
-        IFS='|' read -r expiry_epoch issuer valid_days <<< "$cert_info"
+        if check_entry "$entry"; then
+            ((checked_count++))
 
-        local cert_cn
-        cert_cn=$(get_cert_cn "$host" "$port") || cert_cn="$host"
+            # Check status for this entry
+            local target
+            if [[ "$entry" == /* ]]; then
+                target="file:${entry}"
+            else
+                target="remote:${entry}"
+            fi
 
-        local expiry_date
-        expiry_date=$(format_epoch "$expiry_epoch")
+            local var_name="STATE_${target}"
+            local status="${!var_name:-OK}"
 
-        local status_label status_color
-        status_label=$(get_status_label "$valid_days")
-        status_color=$(get_status_color "$valid_days")
+            if [[ "$status" != "OK" ]]; then
+                ((problem_count++))
+                overall_status=1
+            fi
+        else
+            ((problem_count++))
+            overall_status=1
+        fi
+    done <<< "$entries"
 
-        case "$status_label" in
-            *CRITICAL*) critical=$((critical + 1)) ;;
-            *WARNING*)  warning=$((warning + 1)) ;;
-            *OK*)       ok=$((ok + 1)) ;;
-        esac
+    # Save states after this check
+    save_states
 
-        echo -e "${status_color}${status_label}${NC}  $host:$port"
-        echo -e "         $cert_cn"
-        echo -e "         剩余: ${valid_days} 天 | 过期: $expiry_date"
-        echo
-    done < <(parse_config)
-
-    echo "========================================"
-    echo -e "${BOLD}统计摘要${NC}"
-    echo "========================================"
-    echo -e "总计: $total  | ${RED}严重: $critical${NC} | ${YELLOW}警告: $warning${NC} | ${GREEN}正常: $ok${NC}"
-    echo
-
-    if [[ -n "$output_file" ]]; then
-        {
-            echo "SSL Certificate Expiry Report"
-            echo "Generated: $(date)"
-            echo "Total: $total | Critical: $critical | Warning: $warning | OK: $ok"
-        } > "$output_file"
-        log "INFO" "报告已保存: $output_file"
-    fi
-}
-
-# ============================================================
-# 主函数
-# ============================================================
-main() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -c|--config)    CONFIG_FILE="$2"; shift 2 ;;
-            -i|--interval)  INTERVAL="$2"; shift 2 ;;
-            -d|--days)       WARNING_DAYS="$2"; shift 2 ;;
-            -D|--critical)   CRITICAL_DAYS="$2"; shift 2 ;;
-            -w|--webhook)    NOTIFY_WEBHOOK="$2"; shift 2 ;;
-            -r|--report)    MODE="report"; shift ;;
-            -h|--help)      show_help; exit 0 ;;
-            -v|--version)   show_version; exit 0 ;;
-            *)              echo -e "${RED}未知选项: $1${NC}"; show_help; exit 1 ;;
-        esac
-    done
-
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-    mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null || true
-
-    print_banner
-
-    if [[ "$MODE" == "report" ]]; then
-        generate_report
+    echo ""
+    echo "=========================================="
+    echo "Check complete: ${checked_count} certificates checked"
+    if [[ $problem_count -gt 0 ]]; then
+        echo "Issues found: ${problem_count}"
     else
-        log "INFO" "========== cert-watcher 启动 =========="
-        log "INFO" "配置文件: $CONFIG_FILE"
-        log "INFO" "检测间隔: ${INTERVAL}秒"
-        log "INFO" "告警阈值: ${WARNING_DAYS}天"
-        log "INFO" "严重阈值: ${CRITICAL_DAYS}天"
-
-        while true; do
-            echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} 开始检测证书..."
-            echo
-
-            while IFS= read -r item; do
-                [[ -z "$item" ]] && continue
-                host="${item%:*}"
-                port="${item#*:}"
-                check_cert "$host" "$port"
-            done < <(parse_config)
-
-            echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} 本轮检测完成"
-            log "INFO" "本轮检测完成，下次检测于 ${INTERVAL} 秒后"
-
-            sleep "$INTERVAL"
-        done
+        echo "All certificates OK"
     fi
+    echo "=========================================="
+
+    return $overall_status
 }
 
+# ----------------------------------------------------------------------
+# Continuous Monitoring Mode
+# ----------------------------------------------------------------------
+
+# Run continuous monitoring loop
+# Usage: run_continuous
+run_continuous() {
+    log "INFO" "Starting continuous monitoring mode"
+
+    while true; do
+        # Run a single check
+        run_single
+        local result=$?
+
+        # Log the result
+        if [[ $result -eq 0 ]]; then
+            log "INFO" "All certificates OK"
+        else
+            log "WARN" "Some certificates have issues"
+        fi
+
+        # Wait for next interval
+        log "INFO" "Next check in ${CHECK_INTERVAL} seconds..."
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+# ----------------------------------------------------------------------
+# Main Entry Point
+# ----------------------------------------------------------------------
+
+main() {
+    # Parse command-line arguments
+    parse_args "$@"
+
+    # Ensure required directories exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    mkdir -p "$(dirname "$STATE_FILE")"
+
+    # Run continuous monitoring (always loops)
+    run_continuous
+}
+
+# Run main function with all arguments
 main "$@"
