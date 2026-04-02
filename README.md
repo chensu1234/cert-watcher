@@ -1,31 +1,31 @@
-# cert-watcher 🛡️
+# cert-watcher 🔐
 
-> TLS/SSL 证书到期监控工具
+> SSL/TLS 证书过期监控与告警工具
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
-[![OpenSSL](https://img.shields.io/badge/OpenSSL-Required-blue.svg)](https://www.openssl.org/)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux-lightgrey.svg)](https://www.apple.com/macos/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Shell](https://img.shields.io/badge/Shell-Bash-blue.svg)](https://www.gnu.org/software/bash/)
+[![OpenSSL](https://img.shields.io/badge/OpenSSL-Required-orange.svg)](https://www.openssl.org/)
 
-一个简单实用的 TLS/SSL 证书到期监控工具，自动检测证书过期时间，异常时发送告警通知。
+自动监控多个域名的 SSL/TLS 证书过期时间，异常时通过 Slack Webhook 发送告警。
 
 ## ✨ 特性
 
-- 🔔 **智能告警** - 支持 Slack/钉钉 Webhook 通知
-- ⏰ **灵活配置** - 支持按域名自定义告警阈值
-- 🔄 **循环监控** - 支持定期自动检测
-- 📊 **彩色输出** - 清晰的终端彩色状态展示
-- 🔒 **安全可靠** - 使用 OpenSSL 获取证书信息
-- 🛠️ **轻量简洁** - 纯 Bash 脚本，无依赖
-- 📝 **详细日志** - 完整的运行日志记录
+- 🔐 **自动检测** — 定期检查域名证书过期时间，支持 SNI
+- ⚡ **轻量高效** — 纯 Bash + OpenSSL，无需额外依赖
+- 🔔 **智能告警** — 支持 Slack Webhook，状态变化时才告警（避免轰炸）
+- 📊 **多级阈值** — 警告（默认30天）/ 严重（默认7天）/ 已过期
+- 📝 **状态持久化** — 本地存储上次检查状态，仅在状态变化时告警
+- 📁 **灵活配置** — 命令行参数或环境变量均可配置
+- 🖥️ **彩色输出** — 终端实时显示彩色状态概览
 
 ## 🏃 快速开始
 
-### 环境要求
+### 前提
 
-- Bash 4.0+
-- OpenSSL
-- curl (用于 Webhook 通知)
+- Bash 4.0+（macOS 需安装新版 Bash: `brew install bash`）
+- OpenSSL / LibreSSL
+- GNU coreutils `timeout` 命令（macOS: `brew install coreutils`）
+- curl（仅 Slack 通知功能需要）
 
 ### 安装
 
@@ -41,184 +41,168 @@ chmod +x bin/cert-watcher.sh
 ### 使用
 
 ```bash
-# 使用默认配置检测 (config/domains.conf)
+# 使用默认配置（监控 config/domains.conf 中的域名，间隔1小时）
 ./bin/cert-watcher.sh
-
-# 单次检测后退出
-./bin/cert-watcher.sh --once
 
 # 指定配置文件
 ./bin/cert-watcher.sh -c /path/to/domains.conf
 
-# 设置提前 14 天告警
-./bin/cert-watcher.sh -d 14
+# 设置检测间隔（1800秒 = 30分钟）
+./bin/cert-watcher.sh -i 1800
 
-# 启用 Slack 通知
+# 启用 Slack 告警
 ./bin/cert-watcher.sh -w "https://hooks.slack.com/services/xxx"
 
-# 设置检测间隔 (1 小时)
-./bin/cert-watcher.sh -i 3600
+# 自定义警告阈值（提前14天开始警告，提前3天严重告警）
+./bin/cert-watcher.sh -d 14 -D 3
+```
+
+### 环境变量
+
+```bash
+# 也可以通过环境变量配置
+CONFIG_FILE=./config/domains.conf \
+INTERVAL=3600 \
+TIMEOUT=10 \
+WARN_DAYS=30 \
+CRIT_DAYS=7 \
+NOTIFY_WEBHOOK="https://hooks.slack.com/services/xxx" \
+./bin/cert-watcher.sh
 ```
 
 ## ⚙️ 配置
 
-编辑 `config/domains.conf` 文件：
+编辑 `config/domains.conf` 文件，每行一个域名：
 
 ```bash
-# 格式: domain[:port[:alert_days]]
+# 格式: domain 或 domain:port
+# # 开头为注释
 
-# 基本用法 - 使用默认端口(443)和告警天数
-example.com
-
-# 自定义端口
-example.com:8443
-
-# 自定义告警天数 (提前 14 天告警)
-example.com:443:14
-
-# IP 地址
-192.168.1.1:443
-```
-
-### 配置示例
-
-```bash
-# ============================================================
-# 常用网站
-# ============================================================
+# 标准 HTTPS
 google.com
 github.com
 
-# ============================================================
-# 国内网站
-# ============================================================
-baidu.com
-aliyun.com
+# 自定义端口
+api.example.com:8443
 
-# ============================================================
-# 自定义告警阈值
-# ============================================================
-# 重要站点 - 提前 30 天告警
-payment.example.com:443:30
-
-# 内部服务 - 提前 7 天告警
-internal.example.com:8443:7
+# 带注释说明
+secure.example.com:443   # 生产环境主站
 ```
 
 ## 📋 命令行选项
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| -c, --config FILE | 配置文件路径 | ./config/domains.conf |
-| -i, --interval SEC | 检测间隔秒数 | 86400 (24小时) |
-| -w, --webhook URL | 告警 Webhook URL | - |
-| -d, --days DAYS | 提前告警天数 | 30 |
-| -p, --port PORT | 默认 HTTPS 端口 | 443 |
-| -o, --once | 单次检测后退出 | false |
-| -v, --version | 显示版本信息 | - |
-| -h, --help | 显示帮助信息 | - |
+| `-c, --config FILE` | 域名配置文件路径 | `./config/domains.conf` |
+| `-i, --interval SEC` | 检测间隔（秒） | `3600` (1小时) |
+| `-t, --timeout SEC` | 连接超时（秒） | `10` |
+| `-w, --webhook URL` | 告警 Webhook URL | `-` |
+| `-d, --warn-days N` | 警告阈值（天） | `30` |
+| `-D, --crit-days N` | 严重警告阈值（天） | `7` |
+| `-s, --state-dir DIR` | 状态存储目录 | `./state` |
+| `-l, --log-dir DIR` | 日志目录 | `./log` |
+| `-h, --help` | 显示帮助 | `-` |
+| `-v, --version` | 显示版本 | `-` |
 
 ## 📁 项目结构
 
 ```
 cert-watcher/
 ├── bin/
-│   └── cert-watcher.sh      # 主脚本
+│   └── cert-watcher.sh      # 🎯 主脚本（核心逻辑）
 ├── config/
-│   └── domains.conf         # 域名配置
-├── log/                      # 日志目录
+│   └── domains.conf         # 📋 域名列表配置
+├── log/                      # 📝 日志目录
 │   └── .gitkeep
-├── README.md                 # 说明文档
-├── LICENSE                  # MIT 许可证
-├── CHANGELOG.md             # 变更日志
-└── .gitignore               # Git 忽略规则
+├── state/                    # 💾 状态存储目录
+│   └── .gitkeep
+├── README.md                 # 📖 说明文档
+└── LICENSE                   # 📄 MIT 许可证
 ```
 
-## 🔔 告警通知
+## 🔔 告警示例
 
-### Slack Webhook
+### Slack 告警消息
 
-```bash
-./bin/cert-watcher.sh -w "https://hooks.slack.com/services/xxx"
+证书状态变化时，自动发送彩色 Slack 消息：
+
+| 状态 | 颜色 | 说明 |
+|------|------|------|
+| ✅ 正常 | 绿色 | 证书在阈值之外 |
+| ⚠️ 警告 | 黄色 | 即将过期（≤警告天数） |
+| 🚨 严重 | 红色 | 即将过期（≤严重天数） |
+| 🚨 已过期 | 红色 | 证书已过期 |
+
+### 终端输出示例
+
 ```
+[2026-04-02 12:00:00] [INFO]    cert-watcher 证书监控启动
+==========================================
+  cert-watcher 证书监控概览
+==========================================
+  总计: 3 | 正常: 2 | 警告: 1 | 严重: 0 | 已过期: 0 | 错误: 0
 
-### 钉钉 Webhook
-
-```bash
-./bin/cert-watcher.sh -w "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+  域名                                  剩余天数   状态
+  ------                                --------   ------
+  github.com                           365        正常
+  google.com                           22         警告
+  expired.badssl.com                   -5         已过期
 ```
 
 ## 📝 日志
 
-日志默认保存在 `./log/cert-watcher.log`，包含：
+日志保存在 `./log/cert-watcher.log`，包含：
 
-- 启动/停止信息
-- 证书检测结果
-- 告警通知记录
-- 错误信息
-
-## 🔧 高级用法
-
-### 定时任务 (crontab)
+- 启动和配置信息
+- 每轮检测结果
+- 告警触发记录
+- 错误详情
 
 ```bash
-# 每天早上 9 点检测一次
-0 9 * * * /path/to/cert-watcher/bin/cert-watcher.sh -c /path/to/cert-watcher/config/domains.conf -w "https://hooks.slack.com/services/xxx" -d 14 >> /var/log/cert-watcher.log 2>&1
+# 实时查看日志
+tail -f log/cert-watcher.log
 ```
 
-### Docker 部署
+## 🔧 工作原理
+
+1. **读取配置** — 从 `config/domains.conf` 加载域名列表
+2. **连接检测** — 使用 `openssl s_client` 获取每个域名的证书信息
+3. **计算过期** — 解析证书 `notAfter` 字段，计算剩余天数
+4. **状态对比** — 与本地状态文件对比，只在状态变化时触发告警
+5. **发送通知** — 通过 Slack Webhook 发送彩色告警消息
+6. **持久化** — 保存当前状态到 `state/cert-status` 文件
+
+## 🚀 生产环境建议
 
 ```bash
-docker run -d \
-  --name cert-watcher \
-  -v /path/to/domains.conf:/app/config/domains.conf \
-  -e NOTIFY_WEBHOOK="https://hooks.slack.com/services/xxx" \
-  -e ALERT_DAYS=14 \
-  chen su/cert-watcher
+# 使用 systemd 服务运行（Linux）
+# 创建 /etc/systemd/system/cert-watcher.service
+[Unit]
+Description=cert-watcher SSL Certificate Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/cert-watcher
+ExecStart=/path/to/cert-watcher/bin/cert-watcher.sh \
+    -c /path/to/cert-watcher/config/domains.conf \
+    -i 1800 \
+    -w "https://hooks.slack.com/services/xxx"
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### macOS LaunchAgent
-
-创建 `~/Library/LaunchAgents/com.cert-watcher.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.cert-watcher</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/cert-watcher.sh</string>
-        <string>-c</string>
-        <string>/path/to/domains.conf</string>
-        <string>-w</string>
-        <string>https://hooks.slack.com/services/xxx</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>86400</integer>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>
-```
-
-## 🎯 使用场景
-
-- **DevOps** - 监控生产环境证书过期
-- **安全审计** - 定期检查证书有效期
-- **CI/CD** - 集成到发布流程
-- **个人站点** - 管理多个域名证书
-
-## 🤝 扩展计划
+## 🛠️ 扩展方向
 
 - [ ] 支持邮件通知
-- [ ] 支持企业微信通知
-- [ ] 支持 Prometheus 指标导出
-- [ ] 支持多配置文件
-- [ ] 添加 Web 界面
-- [ ] 支持配置文件热重载
+- [ ] 支持企业微信 / 钉钉 Webhook
+- [ ] Prometheus 指标导出
+- [ ] 支持 Docker 运行
+- [ ] 支持配置文件内的自定义阈值
 
 ## 📄 许可证
 
@@ -231,5 +215,3 @@ Chen Su
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
-
-如果您觉得这个项目有用，请给我一个 ⭐️
