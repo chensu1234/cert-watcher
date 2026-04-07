@@ -1,0 +1,14 @@
+{
+  "cert_status": {
+    "google.com:443": 61,
+    "bing.com:443": 116,
+    "github.com:443": 57,
+    "gitlab.com:443": 34,
+    "cloudflare.com:443": 64,
+    "baidu.com:443": 330,
+    "aliyun.com:443": 150,
+    "tencent.com:443": 78,
+    "letsencrypt.org:443": 60
+  },
+  "last_alert_days": {}
+}

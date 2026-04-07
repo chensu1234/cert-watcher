@@ -1,1 +1,16 @@
-# 日志目录 - cert-watcher
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [1.0.0] - 2026-04-07
+
+### Added
+- Initial release
+- Multi-host SSL/TLS certificate monitoring
+- Configurable warning thresholds (multiple levels)
+- Slack Webhook notification support
+- JSON output mode for integration
+- Certificate details: subject, issuer, dates, fingerprint, serial
+- Status caching to avoid duplicate alerts
+- Summary report after each check cycle
+- Config file support with inline warning overrides
