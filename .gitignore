@@ -1,16 +1,19 @@
-# 日志文件
+# Log files
 *.log
+*.state
 
-# 状态文件（本地生成）
-cert-status
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# macOS 垃圾文件
-.DS_Store
-
-# IDE
+# Editor
 .vscode/
 .idea/
-
-# 临时文件
-*.tmp
 *.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
