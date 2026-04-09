@@ -1,29 +1,25 @@
 # cert-watcher 🔐
 
-> SSL/TLS 证书过期监控与告警工具
+> SSL/TLS 证书过期监控工具 — 轻量、可靠、自动化
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/)
-[![OpenSSL](https://img.shields.io/badge/OpenSSL-Required-blue.svg)](https://www.openssl.org/)
+[![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux-blue.svg)]()
 
-实时监测 SSL/TLS 证书过期时间，支持多主机监控、阈值告警、Slack 通知。
+**cert-watcher** 是一款纯 Shell 编写的 SSL/TLS 证书过期监控工具，支持多主机监控、分级告警、Webhook 通知，适用于服务器运维和 DevOps 场景。
 
 ## ✨ 特性
 
-- 🔍 支持检测任意 HTTPS 服务的证书信息
-- ⏰ 自定义提前告警天数（默认 7/3/1 天）
-- 🔔 支持 Slack Webhook 通知
-- 📝 详细的日志记录（支持 JSON 格式导出）
-- ⚙️ 灵活的配置文件格式
-- 📊 支持输出证书详细信息（颁发者、域名、指纹等）
-- 🖥️ 支持标准输出报告模式（无需守护运行）
+- 🛡️ **纯 Shell 实现** — 无需额外依赖，仅需 OpenSSL
+- 🌐 **多主机监控** — 支持批量检测配置文件中的所有主机
+- 📡 **SNI 支持** — 自动发送 ServerName，正确处理虚拟主机证书
+- 🚨 **分级告警** — 警告 (WARN) / 严重 (CRIT) 两级阈值
+- 📢 **Webhook 通知** — 原生支持 Slack 格式，可扩展至钉钉、企业微信等
+- 🔄 **守护进程模式** — 后台持续监控，灵活设置间隔
+- 🎯 **单次检测模式** — 适合 CI/CD 和一次性检查
+- 📝 **详细日志** — 所有检测结果记录到日志文件
 
 ## 🏃 快速开始
-
-### 前置要求
-
-- Python 3.6+
-- OpenSSL (系统自带或通过 `brew install openssl` / `apt install openssl` 安装)
 
 ### 安装
 
@@ -33,118 +29,127 @@ git clone https://github.com/chensu1234/cert-watcher.git
 cd cert-watcher
 
 # 添加执行权限
-chmod +x bin/cert-watcher.py
+chmod +x bin/cert-watcher.sh
 ```
 
 ### 使用
 
 ```bash
-# 使用默认配置 (config/certs.conf)
-./bin/cert-watcher.py
+# 守护进程模式 (监控 config/hosts.conf 中的所有主机)
+./bin/cert-watcher.sh
+
+# 单次检测 (指定单个主机)
+./bin/cert-watcher.sh --check-once github.com:443
 
 # 指定配置文件
-./bin/cert-watcher.py -c /path/to/certs.conf
+./bin/cert-watcher.sh -c /path/to/hosts.conf
 
-# 设置告警阈值（提前 14/7/3 天告警）
-./bin/cert-watcher.py -w 14,7,3
+# 设置检测间隔为 1 小时，30天开始警告，7天严重告警
+./bin/cert-watcher.sh -i 3600 -w 30 -k 7
 
-# 单次检查并输出 JSON
-./bin/cert-watcher.py --check-once --json
-
-# 指定 Slack Webhook
-./bin/cert-watcher.py -W "https://hooks.slack.com/services/xxx"
+# 启用 Slack Webhook 通知
+./bin/cert-watcher.sh -W "https://hooks.slack.com/services/xxx"
 ```
 
 ## ⚙️ 配置
 
-编辑 `config/certs.conf` 文件：
+### 主机配置
+
+编辑 `config/hosts.conf`：
 
 ```bash
-# 格式: host:port [warning_days]
-# warning_days 可选，逗号分隔，默认使用命令行指定的阈值
+# 格式: host:port
+# # 开头的行为注释
 
-# 监控常见服务
-google.com:443
+# 常用网站
 github.com:443
+google.com:443
+
+# 自定义服务
+example.com:443
 api.example.com:443
-localhost:8443 30,14,7,3  # 自定义阈值
 ```
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CONFIG_FILE` | 配置文件路径 | `./config/hosts.conf` |
+| `LOG_FILE` | 日志文件路径 | `./log/cert-watcher.log` |
+| `INTERVAL` | 检测间隔(秒) | `86400` (24小时) |
+| `TIMEOUT` | 连接超时(秒) | `10` |
+| `WARN_DAYS` | 警告阈值(天) | `30` |
+| `CRIT_DAYS` | 严重阈值(天) | `7` |
+| `NOTIFY_WEBHOOK` | Webhook URL | 空 |
+
+### Webhook 通知
+
+支持 Slack Webhook，将 URL 通过 `-W` 参数传入即可：
+
+```bash
+./bin/cert-watcher.sh -W "https://hooks.slack.com/services/xxx"
+```
+
+告警效果：
+
+- 🟡 **警告 (WARN)** — 证书剩余天数 ≤ 30 天
+- 🔴 **严重 (CRIT)** — 证书剩余天数 ≤ 7 天，或已过期
 
 ## 📋 命令行选项
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| -c, --config FILE | 配置文件路径 | ./config/certs.conf |
-| -i, --interval SEC | 检测间隔（秒） | 86400 (24小时) |
-| -w, --warn DAYS | 告警阈值天数（逗号分隔） | 7,3,1 |
-| -W, --webhook URL | Slack Webhook URL | - |
-| -j, --json | 输出 JSON 格式报告 | false |
-| -o, --once | 单次检查（不守护运行） | false |
-| -q, --quiet | 静默模式（仅告警） | false |
-| -h, --help | 显示帮助信息 | - |
+| `-c, --config FILE` | 配置文件路径 | `./config/hosts.conf` |
+| `-i, --interval SEC` | 检测间隔秒数 | `86400` |
+| `-t, --timeout SEC` | 连接超时秒数 | `10` |
+| `-w, --warn DAYS` | 首次警告天数 | `30` |
+| `-k, --critical DAYS` | 严重警告天数 | `7` |
+| `-W, --webhook URL` | 告警 Webhook URL | - |
+| `-m, --mode MODE` | 运行模式: `daemon` 或 `once` | `daemon` |
+| `-v, --verbose` | 详细输出 | - |
+| `--check-once HOST:PORT` | 单次检测指定主机 | - |
+| `-h, --help` | 显示帮助 | - |
 
 ## 📁 项目结构
 
 ```
 cert-watcher/
 ├── bin/
-│   └── cert-watcher.py        # 主脚本
+│   └── cert-watcher.sh      # 主脚本
 ├── config/
-│   └── certs.conf             # 证书监控配置
-├── log/
-│   └── .gitkeep               # 日志目录占位
+│   └── hosts.conf           # 主机配置
+├── log/                      # 日志目录
+│   └── .gitkeep
+├── lib/                      # 扩展库目录 (预留)
+│   └── .gitkeep
 ├── README.md
-└── LICENSE
-```
-
-## 📊 证书信息
-
-每行配置可指定自定义告警阈值：
-
-```bash
-# host:port  threshold_days...
-example.com:443      30,14,7,3
-```
-
-脚本会自动检测并输出以下证书信息：
-- **Subject**: 证书主题
-- **Issuer**: 颁发机构
-- **Valid From/To**: 有效期
-- **Days Remaining**: 剩余天数
-- **Fingerprint**: SHA-256 指纹
-- **Serial Number**: 序列号
-
-## 🔔 告警通知
-
-### Slack Webhook
-
-```bash
-./bin/cert-watcher.py -W "https://hooks.slack.com/services/xxx"
-```
-
-告警格式：
-```
-🚨 [cert-watcher] 证书即将过期
-🌐 google.com:443
-📅 剩余: 5 天 (到期: 2026-04-12)
-👤 CN=*.google.com
+├── LICENSE
+└── .gitignore
 ```
 
 ## 📝 日志
 
 日志默认保存在 `./log/cert-watcher.log`，包含：
-- 检查时间
-- 证书状态变化
-- 错误信息
-- 告警发送记录
+
+- 启动和关闭信息
+- 每台主机的证书过期检测结果
+- 告警触发记录
+- 错误信息 (连接失败、超时等)
+
+```bash
+# 查看实时日志
+tail -f log/cert-watcher.log
+```
 
 ## 🔧 扩展
 
-- [ ] 添加邮件告警支持
-- [ ] 添加钉钉/企业微信通知
-- [ ] 添加 Prometheus 指标导出
-- [ ] 添加到期排行榜（最紧急的证书列表）
-- [ ] 添加证书链验证
+计划中的功能：
+
+- [ ] 钉钉 Webhook 通知支持
+- [ ] 企业微信通知支持
+- [ ] Prometheus 指标导出
+- [ ] 支持 PEM 证书文件直接读取 (无需网络)
+- [ ] 健康检查端点 (HTTP API)
 
 ## 📄 许可证
 

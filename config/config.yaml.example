@@ -1,0 +1,49 @@
+# cert-watcher configuration example
+
+# List of hosts to monitor
+hosts:
+  - example.com
+  - google.com
+  - github.com
+
+# Check interval (default: 24h)
+check_interval: 24h
+
+# Warning threshold in days (default: 30)
+warning_days: 30
+
+# Critical threshold in days (default: 7)
+critical_days: 7
+
+# Log level: debug, info, warn, error
+log_level: info
+
+# Data directory for storing certificate data
+data_dir: ./data
+
+# Notifiers
+notifiers:
+  email:
+    enabled: false
+    smtp_host: smtp.example.com
+    smtp_port: 587
+    smtp_user: your-email@example.com
+    smtp_password: your-password
+    from: cert-watcher@example.com
+    to:
+      - admin@example.com
+    subject_prefix: "[Cert-Watcher]"
+
+  webhook:
+    enabled: false
+    url: https://hooks.example.com/webhook
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer your-token-here
+
+# Dashboard settings
+dashboard:
+  enabled: true
+  port: 8080
+  host: 0.0.0.0

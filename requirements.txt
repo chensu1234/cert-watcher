@@ -1,0 +1,2 @@
+# cert-watcher dependencies
+cryptography>=41.0.0

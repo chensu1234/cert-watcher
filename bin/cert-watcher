@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""
+cert-watcher - SSL Certificate Expiration Monitor
+Author: Chen Su
+License: MIT
+
+用法:
+    cert-watcher [选项]
+
+选项:
+    -c, --config FILE     配置文件路径 (默认: ./config/domains.conf)
+    -i, --interval SEC    检查间隔（秒），仅 daemon 模式生效 (默认: 86400)
+    -t, --timeout SEC     连接超时（秒）(默认: 10)
+    -w, --webhook URL     Slack Webhook URL
+    -b, --bark URL        Bark 推送 URL
+    -d, --daemon          后台守护进程模式
+    -v, --verbose         详细输出
+    -j, --json            JSON 格式输出
+    --once                仅执行一次检查（默认）
+    -h, --help            显示帮助
+"""
+
+import sys
+import os
+import argparse
+import datetime
+import json
+import signal
+import time
+import logging
+from pathlib import Path
+from typing import List, Optional
+
+# 添加包路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from certwatcher import __version__
+from certwatcher.checker import CertificateChecker, CertificateInfo, format_cert_table
+from certwatcher.config import ConfigParser, merge_config_with_env
+from certwatcher.notifier import NotifierManager
+
+
+# 默认配置
+DEFAULT_CONFIG = "./config/domains.conf"
+DEFAULT_LOG_FILE = "./log/cert-watcher.log"
+DEFAULT_INTERVAL = 86400  # 24小时
+DEFAULT_TIMEOUT = 10
+DEFAULT_WARNING_DAYS = 30
+DEFAULT_CRITICAL_DAYS = 7
+
+
+def setup_logging(log_file: str, verbose: bool):
+    """
+    配置日志系统
+
+    Args:
+        log_file: 日志文件路径
+        verbose: 是否详细输出
+    """
+    log_dir = Path(log_file).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    level = logging.DEBUG if verbose else logging.INFO
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+
+def get_configured_domains(config_file: str) -> List[tuple]:
+    """
+    从配置文件获取域名列表
+
+    Args:
+        config_file: 配置文件路径
+
+    Returns:
+        [(domain, port), ...] 列表
+    """
+    try:
+        parser = ConfigParser(config_file)
+        domains, settings = parser.parse()
+        return domains
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {config_file}")
+        return []
+    except Exception as e:
+        logging.error(f"Failed to parse config: {e}")
+        return []
+
+
+def check_and_notify(
+    domains: List[tuple],
+    checker: CertificateChecker,
+    notifier: NotifierManager,
+    notify_config: dict,
+    warning_days: int = 30,
+    critical_days: int = 7,
+    verbose: bool = False,
+    json_output: bool = False
+) -> List[CertificateInfo]:
+    """
+    执行检查并发送通知
+
+    Args:
+        domains: 域名列表
+        checker: 证书检查器
+        notifier: 通知管理器
+        notify_config: 通知配置
+        warning_days: 警告阈值
+        critical_days: 严重阈值
+        verbose: 详细输出
+        json_output: JSON 输出
+
+    Returns:
+        所有证书信息列表
+    """
+    if not domains:
+        print("No domains to check.")
+        return []
+
+    logging.info(f"Checking {len(domains)} domain(s)...")
+
+    # 执行检查
+    results = checker.check_domains(domains)
+
+    # 分类
+    expired = [c for c in results if c.days_until_expiry < 0]
+    critical = [c for c in results if 0 <= c.days_until_expiry <= critical_days]
+    warning = [c for c in results if critical_days < c.days_until_expiry <= warning_days]
+    errors = [c for c in results if c.error]
+
+    # 输出
+    if json_output:
+        print(json.dumps({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "total": len(results),
+            "expired": len(expired),
+            "critical": len(critical),
+            "warning": len(warning),
+            "errors": len(errors),
+            "certificates": [c.to_dict() for c in results]
+        }, indent=2, default=str))
+    else:
+        print(format_cert_table(results, verbose=verbose))
+        print()
+        print(f"Summary: {len(expired)} expired, {len(critical)} critical, {len(warning)} warning, {len(errors)} errors")
+
+    # 需要通知的证书
+    notify_certs = expired + critical + warning + errors
+
+    if notify_certs and not json_output:
+        print()
+        logging.info(f"Sending notifications for {len(notify_certs)} certificate(s)...")
+        notifier.notify(notify_certs, notify_config)
+
+    return results
+
+
+def daemon_mode(
+    domains: List[tuple],
+    interval: int,
+    timeout: int,
+    warning_days: int,
+    critical_days: int,
+    webhook_url: str,
+    bark_url: str,
+    log_file: str,
+    verbose: bool
+):
+    """
+    守护进程模式主循环
+
+    Args:
+        domains: 域名列表
+        interval: 检查间隔（秒）
+        timeout: 超时时间
+        warning_days: 警告阈值
+        critical_days: 严重阈值
+        webhook_url: Slack Webhook
+        bark_url: Bark URL
+        log_file: 日志文件
+        verbose: 详细输出
+    """
+    setup_logging(log_file, verbose)
+
+    checker = CertificateChecker(timeout=timeout)
+
+    notify_config = {
+        "webhook_url": webhook_url,
+        "bark_url": bark_url,
+        "console": not verbose,  # daemon 模式下 verbose=False 时启用控制台输出
+    }
+    notifier = NotifierManager.from_config(notify_config)
+
+    logging.info("=" * 50)
+    logging.info("cert-watcher daemon started")
+    logging.info(f"Monitoring {len(domains)} domain(s)")
+    logging.info(f"Check interval: {interval} seconds")
+    logging.info("=" * 50)
+
+    # 首次检查
+    check_and_notify(
+        domains, checker, notifier, notify_config,
+        warning_days, critical_days, verbose, json_output=False
+    )
+
+    # 主循环
+    while True:
+        time.sleep(interval)
+
+        # 重新加载域名配置（支持热更新）
+        new_domains = get_configured_domains(args.config)
+        if new_domains:
+            domains = new_domains
+
+        check_and_notify(
+            domains, checker, notifier, notify_config,
+            warning_days, critical_days, verbose, json_output=False
+        )
+
+
+def signal_handler(signum, frame):
+    """处理退出信号"""
+    logging.info("Received signal, shutting down...")
+    sys.exit(0)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="cert-watcher",
+        description="SSL Certificate Expiration Monitor",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cert-watcher -c /path/to/domains.conf
+  cert-watcher -w https://hooks.slack.com/services/xxx
+  cert-watcher -d --interval 3600
+  cert-watcher --json --verbose
+        """
+    )
+
+    parser.add_argument("-c", "--config", default=DEFAULT_CONFIG,
+                        help="Config file path (default: ./config/domains.conf)")
+    parser.add_argument("-i", "--interval", type=int, default=DEFAULT_INTERVAL,
+                        help="Check interval in seconds, only for daemon mode (default: 86400)")
+    parser.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
+                        help="Connection timeout in seconds (default: 10)")
+    parser.add_argument("-w", "--webhook", dest="webhook_url", default="",
+                        help="Slack Webhook URL")
+    parser.add_argument("-b", "--bark", dest="bark_url", default="",
+                        help="Bark push URL")
+    parser.add_argument("-d", "--daemon", action="store_true",
+                        help="Run as daemon")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Verbose output")
+    parser.add_argument("-j", "--json", dest="json_output", action="store_true",
+                        help="JSON output")
+    parser.add_argument("--once", action="store_true", default=True,
+                        help="Run once (default)")
+    parser.add_argument("--warning-days", type=int, default=DEFAULT_WARNING_DAYS,
+                        help="Warning threshold in days (default: 30)")
+    parser.add_argument("--critical-days", type=int, default=DEFAULT_CRITICAL_DAYS,
+                        help="Critical threshold in days (default: 7)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-l", "--log", dest="log_file", default=DEFAULT_LOG_FILE,
+                        help="Log file path (default: ./log/cert-watcher.log)")
+
+    global args
+    args = parser.parse_args()
+
+    # 合并环境变量
+    env_config = merge_config_with_env(vars(args))
+
+    # 从配置文件加载设置
+    config_domains, config_settings = [], {}
+    try:
+        config_parser = ConfigParser(args.config)
+        config_domains, config_settings = config_parser.parse()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Warning: Failed to load config: {e}", file=sys.stderr)
+
+    # 合并配置（命令行参数优先）
+    webhook_url = args.webhook_url or config_settings.get("webhook_url", "")
+    bark_url = args.bark_url or config_settings.get("bark_url", "")
+    timeout = args.timeout
+    interval = args.interval
+    warning_days = args.warning_days
+    critical_days = args.critical_days
+    log_file = args.log_file
+
+    if not config_domains:
+        print("No domains configured. Please add domains to config file or use --config.", file=sys.stderr)
+        sys.exit(1)
+
+    # 设置信号处理
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    if args.daemon:
+        # 守护进程模式
+        daemon_mode(
+            domains=config_domains,
+            interval=interval,
+            timeout=timeout,
+            warning_days=warning_days,
+            critical_days=critical_days,
+            webhook_url=webhook_url,
+            bark_url=bark_url,
+            log_file=log_file,
+            verbose=args.verbose
+        )
+    else:
+        # 单次执行模式
+        if not args.json_output:
+            setup_logging(log_file, args.verbose)
+            logging.info(f"Checking {len(config_domains)} domain(s)...")
+
+        checker = CertificateChecker(timeout=timeout)
+
+        notify_config = {
+            "webhook_url": webhook_url,
+            "bark_url": bark_url,
+            "console": not args.json_output,
+        }
+        notifier = NotifierManager.from_config(notify_config)
+
+        results = check_and_notify(
+            config_domains, checker, notifier, notify_config,
+            warning_days, critical_days, args.verbose, args.json_output
+        )
+
+        # 检查是否有问题证书
+        problem_certs = [c for c in results if c.days_until_expiry <= critical_days or c.error]
+        if problem_certs and not args.json_output:
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

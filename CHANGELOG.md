@@ -2,37 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [1.0.0] - 2026-04-01
+## [1.0.0] - 2024-01-15
 
 ### Added
-
-- Initial release
-- TLS/SSL certificate expiry monitoring
-- Support for Slack Webhook notifications
-- Support for DingTalk (钉钉) Webhook notifications
-- Configurable alert threshold per domain
-- Colored terminal output
-- Detailed logging
-- Single-run mode (`--once`)
-- Configurable check interval
-- Support for custom HTTPS ports
-- Multiple notification channel support
+- Initial release with core functionality
+- Multi-host TLS certificate monitoring
+- Connect to target hosts on port 443 to retrieve TLS certificates
+- Parse certificate Subject, Issuer, Serial, NotBefore, NotAfter
+- Calculate days remaining until expiration
+- Email notification via SMTP
+- HTTP webhook notification support (POST JSON)
+- Interactive web dashboard with color-coded status indicators
+- JSON-based persistent storage for check history
+- Configurable warning_days and critical_days thresholds
+- Notification deduplication (24h window)
+- Batch concurrent checking with configurable timeout
+- Graceful shutdown support
+- Command line flags: --config, --check-once, --version
 
 ### Features
-
-- 🛡️ Certificate expiry detection using OpenSSL
-- ⏰ Configurable alert days (default: 30 days)
-- 🔔 Smart color-coded output in terminal
-- 📝 Comprehensive log file support
-- 🔄 Continuous monitoring loop
-- 🎯 Single domain check mode
-- 🛠️ Flexible configuration format
-
-### Supported Platforms
-
-- macOS (10.15+)
-- Linux (with Bash 4.0+)
-- Other Unix-like systems with Bash and OpenSSL
+- Color-coded dashboard: green (>30 days), yellow (7-30 days), red (<7 days), gray (error)
+- Support for custom check intervals
+- Error handling for connection failures
+- Store last notification time for deduplication
+- History tracking for each monitored host
